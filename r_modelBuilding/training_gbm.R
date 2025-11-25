@@ -20,6 +20,43 @@ SEPSISdat_test<-complete(mice(SEPSISdat_test, method = "pmm",m=1))
 SEPSISdat_train$SI<-SEPSISdat_train$hr_bpm_adm/SEPSISdat_train$sysbp_mmhg_adm
 SEPSISdat_test$SI<-SEPSISdat_test$hr_bpm_adm/SEPSISdat_test$sysbp_mmhg_adm
 
+
+#addition 1) abnormal heart rate based on article
+is_abnormal_hr <- function(age_months, hr) {
+  if (age_months < 1) {                   # Preterm (0 months)
+    return(hr < 120 | hr > 180)
+  } else if (age_months < 12) {           # Newborn–Infant (0–12 months)
+    return(hr < 100 | hr > 160)
+  } else if (age_months < 36) {           # Toddler (1–3 years)
+    return(hr < 80 | hr > 130)
+  } else if (age_months < 60) {           # Preschool (3–5 years)
+    return(hr < 80 | hr > 110)
+  } else if (age_months < 144) {          # School age (6–12 years)
+    return(hr < 70 | hr > 100)
+  } else {                                # Adolescents (12+ years)
+    return(hr < 60 | hr > 100)
+  }
+}
+
+SEPSISdat_train$hr_abnormal <- mapply(is_abnormal_hr,SEPSISdat_train$agecalc_adm,SEPSISdat_train$hr_bpm_adm)
+SEPSISdat_test$hr_abnormal <- mapply(is_abnormal_hr,SEPSISdat_test$agecalc_adm,SEPSISdat_test$hr_bpm_adm
+)
+
+SEPSISdat_train$hr_abnormal <- mapply(is_abnormal_hr,SEPSISdat_train$agecalc_adm,SEPSISdat_train$hr_bpm_adm)
+SEPSISdat_test$hr_abnormal <- mapply(is_abnormal_hr,SEPSISdat_test$agecalc_adm,SEPSISdat_test$hr_bpm_adm
+)
+
+
+##maybe instead create a z score and see how far away the age group is away from the normal?
+
+#z = (patient - mean)/standard deviation
+#for mean use the value of actual healthy score
+#it shows how far away from good the patient is
+
+#addition 2) pulse pressure
+SEPSISdat_train$pulse_pressure <- SEPSISdat_train$sysbp_mmhg_adm - SEPSISdat_train$diasbp_mmhg_adm
+SEPSISdat_test$pulse_pressure  <- SEPSISdat_test$sysbp_mmhg_adm - SEPSISdat_test$diasbp_mmhg_adm
+
 ## Build a gradient boosted tree model using all the training data
 library('lightgbm')
 myTree <- lightgbm(
