@@ -1,98 +1,150 @@
 ## Clear workspace
-rm(list=ls())
+rm(list = ls())
 
 ## TeamName
-team<-"Example"
+team <- "Example"
 
-## Load all the data so we can quickly combine it and explore it. 
+## Load data helper
 source("load_data.R")
-SEPSISdat_train<-load_data("train")
-sum(SEPSISdat_train$inhospital_mortality)/nrow(SEPSISdat_train)
-SEPSISdat_test<-load_data("test")
-sum(SEPSISdat_test$inhospital_mortality)/nrow(SEPSISdat_test)
 
-## Do some data cleaning, e.g. imputation for missing values
-library(mice)
-SEPSISdat_train<-complete(mice(SEPSISdat_train, method = "pmm",m=1))
-SEPSISdat_test<-complete(mice(SEPSISdat_test, method = "pmm",m=1))
+# ---------------------------------------------------------------
+# 1. Load raw training and test datasets
+# ---------------------------------------------------------------
+train_raw <- load_data("train")
+test_raw  <- load_data("test")
 
-## Add some derived variables, e.g. shock index= HR/SBP
-SEPSISdat_train$SI<-SEPSISdat_train$hr_bpm_adm/SEPSISdat_train$sysbp_mmhg_adm
-SEPSISdat_test$SI<-SEPSISdat_test$hr_bpm_adm/SEPSISdat_test$sysbp_mmhg_adm
+cat("Train mortality rate =", round(mean(train_raw$inhospital_mortality), 4), "\n")
+cat("Test mortality rate  =", round(mean(test_raw$inhospital_mortality), 4), "\n")
 
 
-#addition 1) abnormal heart rate based on article
-is_abnormal_hr <- function(age_months, hr) {
-  if (age_months < 1) {                   # Preterm (0 months)
-    return(hr < 120 | hr > 180)
-  } else if (age_months < 12) {           # Newborn–Infant (0–12 months)
-    return(hr < 100 | hr > 160)
-  } else if (age_months < 36) {           # Toddler (1–3 years)
-    return(hr < 80 | hr > 130)
-  } else if (age_months < 60) {           # Preschool (3–5 years)
-    return(hr < 80 | hr > 110)
-  } else if (age_months < 144) {          # School age (6–12 years)
-    return(hr < 70 | hr > 100)
-  } else {                                # Adolescents (12+ years)
-    return(hr < 60 | hr > 100)
-  }
+# ---------------------------------------------------------------
+# 2. Clean string values BEFORE imputation
+# ---------------------------------------------------------------
+clean_strings <- function(df) {
+  df[] <- lapply(df, function(col) {
+    if (is.character(col)) {
+      col <- trimws(col)
+      col[col %in% c("NA", "<NA>", "")] <- NA
+    }
+    col
+  })
+  df
 }
 
-SEPSISdat_train$hr_abnormal <- mapply(is_abnormal_hr,SEPSISdat_train$agecalc_adm,SEPSISdat_train$hr_bpm_adm)
-SEPSISdat_test$hr_abnormal <- mapply(is_abnormal_hr,SEPSISdat_test$agecalc_adm,SEPSISdat_test$hr_bpm_adm
-)
-
-SEPSISdat_train$hr_abnormal <- mapply(is_abnormal_hr,SEPSISdat_train$agecalc_adm,SEPSISdat_train$hr_bpm_adm)
-SEPSISdat_test$hr_abnormal <- mapply(is_abnormal_hr,SEPSISdat_test$agecalc_adm,SEPSISdat_test$hr_bpm_adm
-)
+train <- clean_strings(train_raw)
+test  <- clean_strings(test_raw)
 
 
-##maybe instead create a z score and see how far away the age group is away from the normal?
+# ---------------------------------------------------------------
+# 3. Identify numeric, categorical, and logical variables
+# ---------------------------------------------------------------
+num_vars  <- names(train)[sapply(train, is.numeric)]
+cat_vars  <- names(train)[sapply(train, function(x) is.character(x) || is.factor(x))]
+logi_vars <- names(train)[sapply(train, is.logical)]
 
-#z = (patient - mean)/standard deviation
-#for mean use the value of actual healthy score
-#it shows how far away from good the patient is
 
-#addition 2) pulse pressure
-SEPSISdat_train$pulse_pressure <- SEPSISdat_train$sysbp_mmhg_adm - SEPSISdat_train$diasbp_mmhg_adm
-SEPSISdat_test$pulse_pressure  <- SEPSISdat_test$sysbp_mmhg_adm - SEPSISdat_test$diasbp_mmhg_adm
+# ---------------------------------------------------------------
+# 4. Numeric imputation using MICE (PMM)
+# ---------------------------------------------------------------
+library(mice)
 
-## Build a gradient boosted tree model using all the training data
-library('lightgbm')
+mice_numeric <- mice(train[num_vars], method = "pmm", m = 1)
+train[num_vars] <- complete(mice_numeric)
+
+# Test set: impute numeric with training medians
+for (v in num_vars) {
+  med <- median(train[[v]], na.rm = TRUE)
+  test[[v]][is.na(test[[v]])] <- med
+}
+
+
+# ---------------------------------------------------------------
+# 5. Categorical + logical imputation using mode
+# ---------------------------------------------------------------
+mode_fill <- function(x) {
+  ux <- na.omit(x)
+  if (length(ux) == 0) return(x)
+  mode_value <- names(sort(table(ux), decreasing = TRUE))[1]
+  x[is.na(x)] <- mode_value
+  x
+}
+
+train[cat_vars] <- lapply(train[cat_vars], mode_fill)
+test[cat_vars]  <- lapply(test[cat_vars], mode_fill)
+
+train[logi_vars] <- lapply(train[logi_vars], as.integer)
+test[logi_vars]  <- lapply(test[logi_vars], as.integer)
+
+
+# ---------------------------------------------------------------
+# 6. Fit the LightGBM model
+# ---------------------------------------------------------------
+library(lightgbm)
+
+train_matrix <- as.matrix(subset(train, select = -inhospital_mortality))
+train_label  <- train$inhospital_mortality
+
 myTree <- lightgbm(
-  data = as.matrix(subset(SEPSISdat_train,select=-c(inhospital_mortality)))
-  , label = SEPSISdat_train$inhospital_mortality
-  , objective = "binary"
-  , nrounds=10
+  data      = train_matrix,
+  label     = train_label,
+  objective = "binary",
+  nrounds   = 10
 )
 
-## Quick but not necessarily great way to find a threshold
-SEPSISdat_train$probSepsisGBM <- predict(myTree,newdata=as.matrix(subset(SEPSISdat_train,select=-c(inhospital_mortality))))
-SEPSISdat_test$probSepsisGBM <- predict(myTree,newdata=as.matrix(subset(SEPSISdat_test,select=-c(inhospital_mortality))))
-# Plot the AUC
-library('pROC')
-roc_GBM <- roc(inhospital_mortality ~ probSepsisGBM,data=SEPSISdat_train)
-plot(roc_GBM,main=paste0('AUC=',round(roc_GBM$auc,3)))
-thresh<-coords(roc_GBM, "b", best.method="youden", input = "threshold", transpose = T,
-               ret = c("threshold", "sensitivity","specificity","ppv","npv","fp","tp","fn","tn"))
-roc_GBM_test <- roc(inhospital_mortality ~ probSepsisGBM,data=SEPSISdat_test)
-plot(roc_GBM_test,add=T,col='red')
-text(0.3,0.3,paste0('AUC_test=',round(roc_GBM_test$auc,3)),col="red")
-threshold<-thresh[1]
+#Rank Top 20 Features based on Importance
+importance <- lgb.importance(myTree, percentage = TRUE)
+cat("\nTop 20 Most Important Features:\n")
+print(head(importance, 20))
 
-## Prepare the things needed for submission:
-## Report the values to put into my get_sepsis_score's load_sepsis_model function
-myModel<- NULL
-myModel$thresh <- round(thresh[1],3)
+# Optional: plot
+lgb.plot.importance(importance, top_n = 20)
+
+# ---------------------------------------------------------------
+# 7. Predictions and threshold selection
+# ---------------------------------------------------------------
+train$probGBM <- predict(myTree, as.matrix(subset(train, select = -inhospital_mortality)))
+test$probGBM  <- predict(myTree, as.matrix(subset(test, select = -inhospital_mortality)))
+
+library(pROC)
+
+roc_train <- roc(inhospital_mortality ~ probGBM, data = train)
+plot(roc_train, main = paste0("AUC = ", round(roc_train$auc, 3)))
+
+# IMPORTANT FIX: ask coords() for a single numeric threshold only
+best_thresh <- coords(
+  roc_train,
+  "b",
+  best.method = "youden",
+  ret = "threshold",
+  transpose = FALSE
+)
+
+# Ensure pure numeric scalar
+threshold <- as.numeric(best_thresh)
+
+roc_test <- roc(inhospital_mortality ~ probGBM, data = test)
+plot(roc_test, add = TRUE, col = "red")
+text(0.3, 0.3, paste0("AUC_test = ", round(roc_test$auc, 3)), col = "red")
+
+
+# ---------------------------------------------------------------
+# 8. Prepare model for submission
+# ---------------------------------------------------------------
+myModel <- list()
+myModel$thresh <- round(threshold, 3)
 dput(myModel)
 
-# Save the model and get the threshold for use as a model
-lgb.save(myTree,paste0(team,"_","lightgbm.model"))
-round(thresh[1],3)
+lgb.save(myTree, paste0(team, "_lightgbm.model"))
+round(threshold, 3)
 
-## Quick Performance evaluation evaluate_model(label, prediction_probability, threshold)
-source(file.path("..","scoring","evaluate_performance.R"))
-res<-NULL
-res<-rbind(res,evaluate_model(SEPSISdat_train$inhospital_mortality,SEPSISdat_train$probSepsisGBM,threshold,"Training",0))
-res<-rbind(res,evaluate_model(SEPSISdat_test$inhospital_mortality,SEPSISdat_test$probSepsisGBM,threshold,"Testing",0))
+
+# ---------------------------------------------------------------
+# 9. Evaluate using assignment scoring script
+# ---------------------------------------------------------------
+source(file.path("..", "scoring", "evaluate_performance.R"))
+
+res <- NULL
+res <- rbind(res, evaluate_model(train$inhospital_mortality, train$probGBM, threshold, "Training", 0))
+res <- rbind(res, evaluate_model(test$inhospital_mortality,  test$probGBM,  threshold, "Testing",  0))
+
 print(res)
