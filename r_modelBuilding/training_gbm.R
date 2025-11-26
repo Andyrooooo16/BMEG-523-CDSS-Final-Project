@@ -84,19 +84,17 @@ test[logi_vars]  <- lapply(test[logi_vars], as.integer)
 #the means and standard deviations are based on healthy children
 #from an paper found online
 get_hr_z <- function(age, hr) {
-  if (age < 1/12) {           # Preterm
-    mean <- 150;  sd <- (180-120)/4
-  } else if (age < 1) {       # Newborn (0–1 mo)
+   if (age < 1) {          # 0 - 1 months
     mean <- 130;  sd <- (160-100)/4
-  } else if (age < 12) {      # Infant (1–12 mo)
+  } else if (age < 12) {      #1 - 12 months
     mean <- 110;  sd <- (140-80)/4
-  } else if (age < 36) {      # Toddler (1–3 yr)
+  } else if (age < 36) {      #1 - 3 year olds
     mean <- 105;  sd <- (130-80)/4
-  } else if (age < 60) {      # Preschool (3–5 yr)
+  } else if (age < 60) {      #3-5 year olds
     mean <- 95;   sd <- (110-80)/4
-  } else if (age < 144) {     # School age (6–12 yr)
+  } else if (age < 144) {     # 6 - 12 year olds
     mean <- 85;   sd <- (100-70)/4
-  } else {                    # Adolescents + Adults
+  } else {                    #
     mean <- 80;   sd <- (100-60)/4
   }
   return((hr - mean) / sd)
