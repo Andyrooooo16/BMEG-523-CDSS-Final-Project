@@ -77,6 +77,55 @@ test[logi_vars]  <- lapply(test[logi_vars], as.integer)
 
 
 # ---------------------------------------------------------------
+# 5.5 Feature Creation
+# ---------------------------------------------------------------
+
+#addition 1) Age adjusted HR z scores
+#the means and standard deviations are based on healthy children
+#from an paper found online
+get_hr_z <- function(age, hr) {
+  if (age < 1/12) {           # Preterm
+    mean <- 150;  sd <- (180-120)/4
+  } else if (age < 1) {       # Newborn (0–1 mo)
+    mean <- 130;  sd <- (160-100)/4
+  } else if (age < 12) {      # Infant (1–12 mo)
+    mean <- 110;  sd <- (140-80)/4
+  } else if (age < 36) {      # Toddler (1–3 yr)
+    mean <- 105;  sd <- (130-80)/4
+  } else if (age < 60) {      # Preschool (3–5 yr)
+    mean <- 95;   sd <- (110-80)/4
+  } else if (age < 144) {     # School age (6–12 yr)
+    mean <- 85;   sd <- (100-70)/4
+  } else {                    # Adolescents + Adults
+    mean <- 80;   sd <- (100-60)/4
+  }
+  return((hr - mean) / sd)
+}
+
+train$hr_z <- mapply(get_hr_z, train$agecalc_adm, train$hr_bpm_adm)
+test$hr_z  <- mapply(get_hr_z, test$agecalc_adm,  test$hr_bpm_adm)
+
+
+#addition 2) Pulse pressure 
+train$pulse_pressure <- train$sysbp_mmhg_adm - train$diasbp_mmhg_adm
+test$pulse_pressure  <- test$sysbp_mmhg_adm - test$diasbp_mmhg_adm
+
+
+#addition 3) Mean arterial pressure 
+train$MAP <- (train$sysbp_mmhg_adm + 2 * train$diasbp_mmhg_adm) / 3
+test$MAP  <- (test$sysbp_mmhg_adm + 2 * test$diasbp_mmhg_adm) / 3
+
+
+#addtion 4) Shock index
+train$SI <- train$hr_bpm_adm / train$sysbp_mmhg_adm
+test$SI  <- test$hr_bpm_adm / test$sysbp_mmhg_adm
+
+#addition 5) Modified shock index
+train$modified_shock_index <- train$hr_bpm_adm / train$MAP
+test$modified_shock_index  <- test$hr_bpm_adm / test$MAP
+
+
+# ---------------------------------------------------------------
 # 6. Fit the LightGBM model
 # ---------------------------------------------------------------
 library(lightgbm)
