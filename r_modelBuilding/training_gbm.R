@@ -260,17 +260,89 @@ test$sofa_lite_score <- with(
 # ---------------------------------------------------------------
 # 6. Fit the LightGBM model
 # ---------------------------------------------------------------
+
 library(lightgbm)
+library(pROC)
 
 train_matrix <- as.matrix(subset(train, select = -inhospital_mortality))
 train_label  <- train$inhospital_mortality
 
-myTree <- lightgbm(
-  data      = train_matrix,
-  label     = train_label,
-  objective = "binary",
-  nrounds   = 10
-)
+#default value (found on lightgbm parameter website) should be in the range 
+#of the values according to TA?
+#we can keep tweaking these numbers and play around
+grid_nrounds       <- c(100, 400)
+grid_max_depth     <- c(3, 5, 7)
+grid_learning_rate <- c(0.03, 0.05, 0.1)
+grid_min_data_leaf <- c(20, 50)
+
+
+#initialize our variables
+best_auc <- -Inf
+best_params <- list()
+best_model <- NULL
+
+
+#loop goes through each value in grid
+for (nr in grid_nrounds) {
+  for (md in grid_max_depth) {
+    for (lr in grid_learning_rate) {
+      for (minleaf in grid_min_data_leaf) {
+        
+        params <- list(
+          objective = "binary",
+          metric = "auc",
+          learning_rate = lr,
+          max_depth = md,
+          min_data_in_leaf = minleaf,
+          verbose = -1
+        )
+        
+        cv_res <- lgb.cv(
+          params = params,
+          data = lgb.Dataset(train_matrix, label = train_label),
+          nrounds = nr,
+          nfold = 5,
+          stratified = TRUE,
+          verbose = -1
+        )
+        
+        #safe extraction of CV AUC
+        cv_auc_values <- unlist(cv_res$record_evals$valid$auc$eval)
+        cv_auc <- max(cv_auc_values)
+        
+        cat("nrounds =", nr,
+            "| depth =", md,
+            "| lr =", lr,
+            "| minleaf =", minleaf,
+            "| CV AUC =", round(cv_auc, 4), "\n")
+        
+        if (cv_auc > best_auc) {
+          best_auc <- cv_auc
+          best_params <- list(
+            nrounds = nr,
+            max_depth = md,
+            learning_rate = lr,
+            min_data_in_leaf = minleaf
+          )
+          
+          best_model <- lightgbm(
+            data = train_matrix,
+            label = train_label,
+            params = params,
+            nrounds = nr,
+            verbose = -1
+          )
+        }
+      }
+    }
+  }
+}
+
+cat("\nBest params found by CV:\n")
+print(best_params)
+cat("Best CV AUC =", round(best_auc, 4), "\n")
+
+myTree <- best_model
 
 # Rank Top 20 Features based on Importance
 importance <- lgb.importance(myTree, percentage = TRUE)
