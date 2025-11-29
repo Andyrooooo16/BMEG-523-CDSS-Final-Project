@@ -253,7 +253,6 @@ train_label  <- SEPSISdat_test$inhospital_mortality
 
 grid_nrounds       <- c(100, 400)
 grid_max_depth     <- c(3, 5, 7)
-grid_learning_rate <- c(0.03, 0.05, 0.1)
 grid_min_data_leaf <- c(20, 50)
 
 #initialize our variables to track our model
@@ -264,21 +263,18 @@ best_model <- NULL
 #loop goes through each combination of the parameters we included above
 for (nr in grid_nrounds) {
   for (md in grid_max_depth) {
-    for (lr in grid_learning_rate) {
       for (minleaf in grid_min_data_leaf) {
         
         #this is our parameter list for the lightgbm model
         params <- list(
           objective = "binary",
           metric = "auc",
-          learning_rate = lr,
           max_depth = md,
           min_data_in_leaf = minleaf,
           verbose = -1
         )
         
-        
-        #this is the cross validation using and produces the average cross validation results
+        #this is the cross validation and produces the average cross validation results
         #prevents overfitting?
         cv_res <- lgb.cv(
           params = params,
@@ -295,7 +291,6 @@ for (nr in grid_nrounds) {
         
         cat("nrounds =", nr,
             "| depth =", md,
-            "| lr =", lr,
             "| minleaf =", minleaf,
             "| CV AUC =", round(cv_auc, 4), "\n")
         
@@ -305,7 +300,6 @@ for (nr in grid_nrounds) {
           best_params <- list(
             nrounds = nr,
             max_depth = md,
-            learning_rate = lr,
             min_data_in_leaf = minleaf
           )
           
@@ -319,7 +313,6 @@ for (nr in grid_nrounds) {
         }
       }
     }
-  }
 }
 
 cat("\nBest params found by CV:\n")
@@ -343,7 +336,7 @@ lgb.plot.importance(importance, top_n = 20)
 #max depth
 #min data in leaf (may work against max depth)
 
-#look a parameters that can be used to deal with overfitting
+#look at parameters that can be used to deal with overfitting
 
 #bagging fraction not important
 
