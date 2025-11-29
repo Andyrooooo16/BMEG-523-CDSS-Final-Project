@@ -11,7 +11,7 @@ last_col<-ncol(SEPSISdat_train)-1
 ## Apply the model
 # Load the definitions once
 filename<-"get_sepsis_score_gbm.R"
-filename<-"get_sepsis_score_LR.R"
+#filename<-"get_sepsis_score_LR.R"
 source(file.path("..","scoring",filename))
 myModel<-load_sepsis_model()
 # Run the three models
