@@ -21,6 +21,153 @@ library(mice)
 SEPSISdat_train<-complete(mice(SEPSISdat_train, method = "pmm",m=1))
 SEPSISdat_test<-complete(mice(SEPSISdat_test, method = "pmm",m=1))
 
+
+
+## Cleaning the height and weight column, assuming our age is source of truth
+library(dplyr)
+library(ggplot2)
+
+###----------------------------------------------------------
+### 1. Create age bins (6-month bins)
+###----------------------------------------------------------
+
+SEPSISdat_train$age_bin <- cut(
+  SEPSISdat_train$agecalc_adm,
+  breaks = seq(0, 72, by = 6),      # 0–6, 6–12, ... , 66–72
+  include.lowest = TRUE,
+  right = FALSE
+)
+
+###----------------------------------------------------------
+### 2. Function to flag outliers using IQR rule
+###----------------------------------------------------------
+
+flag_outliers <- function(x) {
+  Q1  <- quantile(x, 0.25, na.rm = TRUE)
+  Q3  <- quantile(x, 0.75, na.rm = TRUE)
+  IQRv <- Q3 - Q1
+  
+  lower <- Q1 - 1.5 * IQRv
+  upper <- Q3 + 1.5 * IQRv
+  
+  return(x < lower | x > upper)
+}
+
+###----------------------------------------------------------
+### 3. Apply outlier detection within each age bin
+###----------------------------------------------------------
+
+SEPSISdat_train_clean <- SEPSISdat_train %>%
+  group_by(age_bin) %>%
+  mutate(
+    weight_outlier = flag_outliers(weight_kg_adm),
+    height_outlier = flag_outliers(height_cm_adm)
+  ) %>%
+  ungroup()
+
+###----------------------------------------------------------
+### 4. Remove rows containing outliers
+###----------------------------------------------------------
+
+SEPSISdat_train_clean <- SEPSISdat_train_clean %>%
+  filter(!weight_outlier & !height_outlier)
+
+###----------------------------------------------------------
+### 5. Report how many rows were removed
+###----------------------------------------------------------
+
+rows_original <- nrow(SEPSISdat_train)
+rows_cleaned  <- nrow(SEPSISdat_train_clean)
+
+cat("Original rows:", rows_original, "\n")
+cat("Cleaned rows: ", rows_cleaned, "\n")
+cat("Rows removed:", rows_original - rows_cleaned, "\n")
+
+###----------------------------------------------------------
+### Before/After Plots
+###----------------------------------------------------------
+
+# Before cleaning
+ggplot(SEPSISdat_train, aes(x = agecalc_adm, y = weight_kg_adm)) +
+  geom_point(alpha = 0.3, color = "#1f77b4") +
+  labs(title = "Age vs Weight (Before Cleaning)",
+       x = "Age (months)",
+       y = "Weight (kg)") +
+  theme_minimal()
+
+# After cleaning
+ggplot(SEPSISdat_train_clean, aes(x = agecalc_adm, y = weight_kg_adm)) +
+  geom_point(alpha = 0.3, color = "#2ca02c") +
+  labs(title = "Age vs Weight (After Cleaning)",
+       x = "Age (months)",
+       y = "Weight (kg)") +
+  theme_minimal()
+
+# Before cleaning plot for HEIGHT
+ggplot(SEPSISdat_train, aes(x = agecalc_adm, y = height_cm_adm)) +
+  geom_point(alpha = 0.3, color = "#d62728") +
+  labs(title = "Age vs Height (Before Cleaning)",
+       x = "Age (months)",
+       y = "Height (cm)") +
+  theme_minimal()
+
+# Apply same outlier-flagging logic for height
+SEPSISdat_train_heightClean <- SEPSISdat_train %>%
+  group_by(age_bin) %>%  
+  mutate(height_outlier = flag_outliers(height_cm_adm)) %>%
+  ungroup() %>%
+  filter(!height_outlier)
+
+# After cleaning plot for HEIGHT
+ggplot(SEPSISdat_train_heightClean, aes(x = agecalc_adm, y = height_cm_adm)) +
+  geom_point(alpha = 0.3, color = "#17becf") +
+  labs(title = "Age vs Height (After Cleaning)",
+       x = "Age (months)",
+       y = "Height (cm)") +
+  theme_minimal()
+
+# Summary stats
+rows_original_height <- nrow(SEPSISdat_train)
+rows_cleaned_height  <- nrow(SEPSISdat_train_heightClean)
+
+cat("Height Cleaning\n")
+cat("Original rows:", rows_original_height, "\n")
+cat("Cleaned rows: ", rows_cleaned_height, "\n")
+cat("Rows removed:", rows_original_height - rows_cleaned_height, "\n")
+
+
+#remove these columns after cleaning or else it messes up our model training
+SEPSISdat_train_clean <- SEPSISdat_train_clean %>%
+  select(-age_bin, -weight_outlier, -height_outlier)
+
+#set our train data to this new cleaned data
+SEPSISdat_train <- SEPSISdat_train_clean
+
+
+#reasoning for my cleaning above:
+# Why we remove  outliers instead of trying to correct them
+# In this dataset, age, height, and weight can all contain human entry or 
+# imputation errors. Because none of these variables can be guaranteed as the 
+# true reference, it is impossible to know which specific value is wrong when a 
+# combination looks biologically implausible. 
+
+# For example, if a 6-month-old child appears to weigh 15 kg, we cannot determine 
+# whether the age is incorrect, the weight is incorrect, the height is incorrect, 
+# or multiple fields were entered incorrectly. Correcting any one value would 
+# introduce guesswork
+
+# Therefore, the only safe and unbiased approach is to REMOVE rows containing 
+# combinations that fall far outside realistic pediatric ranges. 
+# This avoids inventing artificial values,introducing bias,
+# altering true patient measurements,and contaminating the model with impossible 
+# physiology.
+
+# Removing outliers preserves the integrity of the dataset by ensuring that only 
+# biologically plausible observations are used for training. 
+
+
+
+
 ## Add some derived variables, e.g. shock index= HR/SBP
 SEPSISdat_train$SI<-SEPSISdat_train$hr_bpm_adm/SEPSISdat_train$sysbp_mmhg_adm
 SEPSISdat_test$SI<-SEPSISdat_test$hr_bpm_adm/SEPSISdat_test$sysbp_mmhg_adm
@@ -51,7 +198,7 @@ SEPSISdat_train$hr_z <- mapply(get_hr_z, SEPSISdat_train$agecalc_adm, SEPSISdat_
 SEPSISdat_test$hr_z  <- mapply(get_hr_z,  SEPSISdat_test$agecalc_adm,  SEPSISdat_test$hr_bpm_adm)
 
 
-#Age Adjusted RR Z score
+## 5.5.1.2 Age Adjusted RR Z score
 get_rr_z <- function(age, rr) {
   
   if (age < 12) {                     # 0 to 1 year (0–11 months)
@@ -232,17 +379,15 @@ SEPSISdat_test$sofa_lite_score <- with(
 )
 
 
-##calculate feature importance gives us insight into maybe scaling or into which features to cut
-## Build a gradient boosted tree model using all the training data
 
 library(lightgbm)
 library(pROC)
 
 #this matrix is all our predictive features
-train_matrix <- as.matrix(subset(SEPSISdat_test, select = -inhospital_mortality))
+train_matrix <- as.matrix(subset(SEPSISdat_train, select = -inhospital_mortality))
 
 #this is the binary outcome that we are testing for?
-train_label  <- SEPSISdat_test$inhospital_mortality
+train_label  <- SEPSISdat_train$inhospital_mortality
 
 #default value (found on lightgbm parameter website) should be in the range 
 #of the values in our grid search
@@ -260,11 +405,14 @@ best_auc <- -Inf
 best_params <- list()
 best_model <- NULL
 
+##dont train for accuracy, train for something else?
+
+
 #loop goes through each combination of the parameters we included above
 for (nr in grid_nrounds) {
   for (md in grid_max_depth) {
       for (minleaf in grid_min_data_leaf) {
-        
+
         #this is our parameter list for the lightgbm model
         params <- list(
           objective = "binary",
@@ -273,7 +421,7 @@ for (nr in grid_nrounds) {
           min_data_in_leaf = minleaf,
           verbose = -1
         )
-        
+
         #this is the cross validation and produces the average cross validation results
         #prevents overfitting?
         cv_res <- lgb.cv(
@@ -284,16 +432,16 @@ for (nr in grid_nrounds) {
           stratified = TRUE,
           verbose = -1
         )
-        
+
         #extracts the cross validated AUC
         cv_auc_values <- unlist(cv_res$record_evals$valid$auc$eval)
         cv_auc <- max(cv_auc_values)
-        
+
         cat("nrounds =", nr,
             "| depth =", md,
             "| minleaf =", minleaf,
             "| CV AUC =", round(cv_auc, 4), "\n")
-        
+
         #checks if model is better than the best one
         if (cv_auc > best_auc) {
           best_auc <- cv_auc
@@ -302,7 +450,7 @@ for (nr in grid_nrounds) {
             max_depth = md,
             min_data_in_leaf = minleaf
           )
-          
+
           best_model <- lightgbm(
             data = train_matrix,
             label = train_label,
@@ -320,6 +468,7 @@ print(best_params)
 cat("Best CV AUC =", round(best_auc, 4), "\n")
 
 myTree <- best_model
+
 
 # Rank Top 20 Features based on Importance
 importance <- lgb.importance(myTree, percentage = TRUE)
@@ -350,12 +499,6 @@ lgb.plot.importance(importance, top_n = 20)
 
 #allows us to get the best hyper parameters (do not include learning rate in this method)
 
-
-#light GBM uses multiple decision trees
-#decision trees predicts outcomes by asking a series of questions about the variables
-#in the dataset and it eventually leads to final decision
-#each node represents a decision point, ex is HR > 120, then it branches off
-#at the very end, we will reach a leaf that says patient has sepsis or no sepsis
 
 
 
