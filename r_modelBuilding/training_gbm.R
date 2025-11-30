@@ -1,477 +1,308 @@
 ## Clear workspace
-rm(list=ls())
+rm(list = ls())
+set.seed(123)
 
-## TeamName
-team<-"Example"
+team <- "Team 4"
 
-## Load all the data so we can quickly combine it and explore it. 
+## 1. Load all the data so we can quickly combine it and explore it. 
+
 source("load_data.R")
-SEPSISdat_train<-load_data("train")
-sum(SEPSISdat_train$inhospital_mortality)/nrow(SEPSISdat_train)
-SEPSISdat_test<-load_data("test")
-sum(SEPSISdat_test$inhospital_mortality)/nrow(SEPSISdat_test)
 
-##some values are NA
-#consider front fill/back fill? Or is the mice function below enough?
-#only important for time series data?
+rawTrain <- load_data("train")
+rawTest  <- load_data("test")
 
+cat("Train mortality rate =", round(mean(rawTrain$inhospital_mortality), 4), "\n")
+cat("Test mortality rate  =", round(mean(rawTest$inhospital_mortality), 4), "\n")
 
-## Do some data cleaning, e.g. imputation for missing values
-library(mice)
-SEPSISdat_train<-complete(mice(SEPSISdat_train, method = "pmm",m=1))
-SEPSISdat_test<-complete(mice(SEPSISdat_test, method = "pmm",m=1))
+## 2. Clean string-valued columns
+fixStrings <- function(df) {
+  for(nm in names(df)) {
+    col <- df[[nm]]
+    if(is.character(col)) {
+      col <- trimws(col)
+      badVals <- col %in% c("", "NA", "<NA>")
+      if(any(badVals)) col[badVals] <- NA
+      df[[nm]] <- col
+    }
+  }
+  df
+}
 
+train <- fixStrings(rawTrain)
+test  <- fixStrings(rawTest)
 
-## Cleaning the height and weight column, assuming our age is source of truth
+## 3. Identify numeric vs categorical
+numCols <- names(train)[sapply(train, is.numeric)]
+catCols <- names(train)[sapply(train, function(x) is.factor(x) || is.character(x))]
+numCols <- numCols[numCols != "inhospital_mortality"]
+
+## 4. Numeric median imputation
+numMeds <- sapply(train[numCols], function(x) median(x, na.rm = TRUE))
+
+for(v in numCols){
+  if(any(is.na(train[[v]]))) train[[v]][is.na(train[[v]])] <- numMeds[[v]]
+  if(any(is.na(test[[v]])))  test[[v]][is.na(test[[v]])]  <- numMeds[[v]]
+}
+
+## 5. Categorical mode imputation
+mode_of <- function(x){
+  x_no_na <- x[!is.na(x)]
+  if(length(x_no_na) == 0) return(NA)
+  names(sort(table(x_no_na), decreasing = TRUE))[1]
+}
+
+catModes <- sapply(train[catCols], mode_of)
+
+for(v in catCols){
+  if(is.factor(train[[v]])){
+    train[[v]] <- droplevels(train[[v]])
+    test[[v]]  <- factor(test[[v]], levels = levels(train[[v]]))
+  } else {
+    train[[v]] <- as.character(train[[v]])
+    test[[v]]  <- as.character(test[[v]])
+  }
+  m <- catModes[[v]]
+  train[[v]][is.na(train[[v]])] <- m
+  test[[v]][is.na(test[[v]])]   <- m
+  train[[v]] <- as.factor(train[[v]])
+  test[[v]]  <- factor(test[[v]], levels = levels(train[[v]]))
+}
+
+## 5.5 Remove height/weight outliers by age bin (train only)
 library(dplyr)
 
-#create our age bins with a 6 month gap and go all the way to 72 to ensure
-#we can capture all childrens ages,
-SEPSISdat_train$age_bin <- cut(
-  SEPSISdat_train$agecalc_adm,
-  breaks = seq(0, 72, by = 6),      
+train$age_bin <- cut(
+  train$agecalc_adm,
+  breaks = seq(0, 72, by = 6),
   include.lowest = TRUE,
-  
-  #this means the intervals are left closed and right-open
-  #i.e [0, 6)
   right = FALSE
 )
 
-#function to flag any outliers
-flag_outliers <- function(x) {
+flag_outliers <- function(x){
   Q1  <- quantile(x, 0.25, na.rm = TRUE)
   Q3  <- quantile(x, 0.75, na.rm = TRUE)
   IQRv <- Q3 - Q1
-
-  lower <- Q1 - 1.5 * IQRv
-  upper <- Q3 + 1.5 * IQRv
-  
-  #returns true if its an outlier, i.e below the lower or above the upper
-  return(x < lower | x > upper)
+  x < (Q1 - 1.5 * IQRv) | x > (Q3 + 1.5 * IQRv)
 }
 
-
-#groups children by age, detects height/weight outliers within each age group, 
-#and adds new columns telling you whether each row is an outlier.
-SEPSISdat_train_clean <- SEPSISdat_train %>%
+train_clean <- train %>%
   group_by(age_bin) %>%
   mutate(
-    
-    #this adds the 2 new columns
     weight_outlier = flag_outliers(weight_kg_adm),
     height_outlier = flag_outliers(height_cm_adm)
   ) %>%
   ungroup()
 
+cat("Original rows:", nrow(train), "\n")
+train_clean <- train_clean %>% filter(!weight_outlier & !height_outlier)
+cat("Cleaned rows:", nrow(train_clean), "\n")
+cat("Rows removed:", nrow(train) - nrow(train_clean), "\n")
 
-#removes the outliers
-SEPSISdat_train_clean <- SEPSISdat_train_clean %>%
-  filter(!weight_outlier & !height_outlier)
-
-
-#prints how many rows we originally had and the rows we have after
-#removing outliers
-rows_original <- nrow(SEPSISdat_train)
-rows_cleaned  <- nrow(SEPSISdat_train_clean)
-
-cat("Original rows:", rows_original, "\n")
-cat("Cleaned rows: ", rows_cleaned, "\n")
-cat("Rows removed:", rows_original - rows_cleaned, "\n")
-
-
-#remove these columns after cleaning or else it messes up our model training
-SEPSISdat_train_clean <- SEPSISdat_train_clean %>%
+train_clean <- train_clean %>%
   select(-age_bin, -weight_outlier, -height_outlier)
 
-#set our train data to this new cleaned data
-SEPSISdat_train <- SEPSISdat_train_clean
+train <- train_clean
 
+## 6. Clinical engineered features
+train$MAP <- (train$sysbp_mmhg_adm + 2 * train$diasbp_mmhg_adm) / 3
+test$MAP  <- (test$sysbp_mmhg_adm  + 2 * test$diasbp_mmhg_adm)  / 3
 
-#reasoning for my cleaning above:
-# Why we remove  outliers instead of trying to correct them
-# In this dataset, age, height, and weight can all contain human entry or 
-# imputation errors. Because none of these variables can be guaranteed as the 
-# true reference, it is impossible to know which specific value is wrong when a 
-# combination looks biologically implausible. 
+train$pulse_pressure <- train$sysbp_mmhg_adm - train$diasbp_mmhg_adm
+test$pulse_pressure  <- test$sysbp_mmhg_adm  - test$diasbp_mmhg_adm
 
-# For example, if a 6-month-old child appears to weigh 15 kg, we cannot determine 
-# whether the age is incorrect, the weight is incorrect, the height is incorrect, 
-# or multiple fields were entered incorrectly. Correcting any one value would 
-# introduce guesswork
+train$SI <- train$hr_bpm_adm / pmax(train$sysbp_mmhg_adm, 1e-3)
+test$SI  <- test$hr_bpm_adm  / pmax(test$sysbp_mmhg_adm,  1e-3)
 
-# Therefore, the only safe and unbiased approach is to remove rows containing 
-# combinations that fall far outside realistic pediatric ranges. 
-# This avoids inventing artificial values,introducing bias,
-# altering true patient measurements,and contaminating the model with impossible 
-# physiology.
-
-# Removing outliers preserves the integrity of the dataset by ensuring that only 
-# biologically plausible observations are used for training. 
-
-
-
-
-## Add some derived variables, e.g. shock index= HR/SBP
-SEPSISdat_train$SI<-SEPSISdat_train$hr_bpm_adm/SEPSISdat_train$sysbp_mmhg_adm
-SEPSISdat_test$SI<-SEPSISdat_test$hr_bpm_adm/SEPSISdat_test$sysbp_mmhg_adm
-
-
-##change variables based on age, but only the vital signs that DO change with age
-
-
-
-## 5.5.1 Age adjusted HR z score (based on healthy pediatric ranges)
-get_hr_z <- function(age, hr) {
-  if (age < 1) {             # 0 - 1 month
-    mean <- 130; sd <- (160 - 100) / 4
-  } else if (age < 12) {     # 1 - 12 months
-    mean <- 110; sd <- (140 - 80) / 4
-  } else if (age < 36) {     # 1 - 3 years
-    mean <- 105; sd <- (130 - 80) / 4
-  } else if (age < 60) {     # 3 - 5 years
-    mean <- 95;  sd <- (110 - 80) / 4
-  } else if (age < 144) {    # 6 - 12 years
-    mean <- 85;  sd <- (100 - 70) / 4
-  } else {                   # adolescents
-    mean <- 80;  sd <- (100 - 60) / 4
-  }
-  (hr - mean) / sd
-}
-
-SEPSISdat_train$hr_z <- mapply(get_hr_z, SEPSISdat_train$agecalc_adm, SEPSISdat_train$hr_bpm_adm)
-SEPSISdat_test$hr_z  <- mapply(get_hr_z,  SEPSISdat_test$agecalc_adm,  SEPSISdat_test$hr_bpm_adm)
-
-
-## 5.5.1.2 Age Adjusted RR Z score (based on healthy patients)
-get_rr_z <- function(age, rr) {
-  
-  if (age < 12) {                     # 0 to 1 year (0–11 months)
-    mean <- 45;  sd <- (60 - 30) / 4  # 30–60
-    
-  } else if (age < 36) {              # 1–3 years
-    mean <- 32;  sd <- (40 - 24) / 4  # 24–40
-    
-  } else if (age < 72) {              # 3–6 years
-    mean <- 28;  sd <- (34 - 22) / 4  # 22–34
-    
-  } else if (age < 144) {             # 6–12 years
-    mean <- 24;  sd <- (30 - 18) / 4  # 18–30
-    
-  } else {                            # 12–18 years (adolescent)
-    mean <- 14;  sd <- (16 - 12) / 4  # 12–16
-  }
-  
-  (rr - mean) / sd
-}
-
-SEPSISdat_train$rr_z <- mapply(get_rr_z, SEPSISdat_train$agecalc_adm, SEPSISdat_train$rr_brpm_app_adm)
-SEPSISdat_test$rr_z  <- mapply(get_rr_z,  SEPSISdat_test$agecalc_adm,  SEPSISdat_test$rr_brpm_app_adm)
-
-
-
-## 5.5.2 Basic haemodynamic features
-# Pulse pressure
-SEPSISdat_train$pulse_pressure <- SEPSISdat_train$sysbp_mmhg_adm - SEPSISdat_train$diasbp_mmhg_adm
-SEPSISdat_test$pulse_pressure  <- SEPSISdat_test$sysbp_mmhg_adm  - SEPSISdat_test$diasbp_mmhg_adm
-
-# Mean arterial pressure (MAP)
-SEPSISdat_train$MAP <- (SEPSISdat_train$sysbp_mmhg_adm + 2 * SEPSISdat_train$diasbp_mmhg_adm) / 3
-SEPSISdat_test$MAP  <- (SEPSISdat_test$sysbp_mmhg_adm  + 2 * SEPSISdat_test$diasbp_mmhg_adm)  / 3
-
-# Shock index (HR / SBP)
-SEPSISdat_train$SI <- SEPSISdat_train$hr_bpm_adm / SEPSISdat_train$sysbp_mmhg_adm
-SEPSISdat_test$SI  <- SEPSISdat_test$hr_bpm_adm  / SEPSISdat_test$sysbp_mmhg_adm
-
-# Modified shock index (HR / MAP)
-SEPSISdat_train$modified_shock_index <- SEPSISdat_train$hr_bpm_adm / SEPSISdat_train$MAP
-SEPSISdat_test$modified_shock_index  <- SEPSISdat_test$hr_bpm_adm  / SEPSISdat_test$MAP
-
-
-## 5.5.3 SIRS-like features (vitals-only version)
-
-# Temperature flag (fever or hypothermia)
-SEPSISdat_train$sirs_temp_flag <- with(SEPSISdat_train, as.integer(temp_c_adm > 38 | temp_c_adm < 36))
-SEPSISdat_test$sirs_temp_flag  <- with(SEPSISdat_test,  as.integer(temp_c_adm > 38 | temp_c_adm < 36))
-
-# Heart rate flag (simple tachycardia threshold)
-SEPSISdat_train$sirs_hr_flag <- with(SEPSISdat_train, as.integer(hr_bpm_adm > 90))
-SEPSISdat_test$sirs_hr_flag  <- with(SEPSISdat_test,  as.integer(hr_bpm_adm > 90))
-
-# Respiratory rate flag (tachypnea)
-SEPSISdat_train$sirs_rr_flag <- with(SEPSISdat_train, as.integer(rr_brpm_app_adm > 20))
-SEPSISdat_test$sirs_rr_flag  <- with(SEPSISdat_test,  as.integer(rr_brpm_app_adm > 20))
-
-# SIRS-like total score (0–3) and positive indicator (>=2)
-SEPSISdat_train$sirs_score    <- SEPSISdat_train$sirs_temp_flag + SEPSISdat_train$sirs_hr_flag + SEPSISdat_train$sirs_rr_flag
-SEPSISdat_test$sirs_score     <- SEPSISdat_test$sirs_temp_flag  + SEPSISdat_test$sirs_hr_flag  + SEPSISdat_test$sirs_rr_flag
-
-SEPSISdat_train$sirs_positive <- as.integer(SEPSISdat_train$sirs_score >= 2)
-SEPSISdat_test$sirs_positive  <- as.integer(SEPSISdat_test$sirs_score  >= 2)
-
-
-## 5.5.4 Respiratory SOFA-like proxies
-
-# Respiratory failure flag: low SpO2 or documented respiratory distress
-SEPSISdat_train$resp_failure_flag <- with(
-  SEPSISdat_train,
-  as.integer(spo2site1_pc_oxi_adm < 92 | respdistress_adm > 0)
+train$resp_failure_flag <- as.integer(
+  train$spo2site1_pc_oxi_adm < 92 |
+    (!is.na(train$respdistress_adm) & train$respdistress_adm != "F")
 )
-SEPSISdat_test$resp_failure_flag <- with(
-  SEPSISdat_test,
-  as.integer(spo2site1_pc_oxi_adm < 92 | respdistress_adm > 0)
+test$resp_failure_flag <- as.integer(
+  test$spo2site1_pc_oxi_adm < 92 |
+    (!is.na(test$respdistress_adm) & test$respdistress_adm != "F")
 )
 
-# Respiratory severity score (0–2): RR high + low SpO2
-SEPSISdat_train$resp_severity_score <- with(
-  SEPSISdat_train,
-  as.integer(rr_brpm_app_adm >= 22) + as.integer(spo2site1_pc_oxi_adm < 92)
-)
-SEPSISdat_test$resp_severity_score <- with(
-  SEPSISdat_test,
-  as.integer(rr_brpm_app_adm >= 22) + as.integer(spo2site1_pc_oxi_adm < 92)
-)
-
-
-## 5.5.5 Cardiovascular SOFA-like proxies
-
-# Hypotension flag
-SEPSISdat_train$hypotension_flag <- as.integer(SEPSISdat_train$MAP < 65)
-SEPSISdat_test$hypotension_flag  <- as.integer(SEPSISdat_test$MAP  < 65)
-
-# Cardiovascular failure flag: more severe hypotension or marked shock index
-SEPSISdat_train$cv_failure_flag <- as.integer(SEPSISdat_train$MAP < 60 | SEPSISdat_train$modified_shock_index > 2)
-SEPSISdat_test$cv_failure_flag  <- as.integer(SEPSISdat_test$MAP  < 60 | SEPSISdat_test$modified_shock_index  > 2)
-
-
-## 5.5.6 Renal proxies (symptom-based)
-
-# Oliguria and abnormal urine color are stored as 0/1 after logi -> integer conversion
-SEPSISdat_train$renal_flag_oliguria   <- as.integer(SEPSISdat_train$symptoms_adm_oliguria   > 0)
-SEPSISdat_test$renal_flag_oliguria    <- as.integer(SEPSISdat_test$symptoms_adm_oliguria    > 0)
-
-SEPSISdat_train$renal_flag_urinecolor <- as.integer(SEPSISdat_train$symptoms_adm_urinecolor > 0)
-SEPSISdat_test$renal_flag_urinecolor  <- as.integer(SEPSISdat_test$symptoms_adm_urinecolor  > 0)
-
-# Simple renal symptom score (0–2)
-SEPSISdat_train$renal_score <- SEPSISdat_train$renal_flag_oliguria + SEPSISdat_train$renal_flag_urinecolor
-SEPSISdat_test$renal_score  <- SEPSISdat_test$renal_flag_oliguria  + SEPSISdat_test$renal_flag_urinecolor
-
-# Kidney performance ratio: 1 = no symptoms, 0 = both present
-SEPSISdat_train$kidney_performance_ratio <- 1 - pmin(SEPSISdat_train$renal_score, 2) / 2
-SEPSISdat_test$kidney_performance_ratio  <- 1 - pmin(SEPSISdat_test$renal_score,  2) / 2
-
-# Any renal involvement flag
-SEPSISdat_train$renal_flag <- as.integer(SEPSISdat_train$renal_score > 0)
-SEPSISdat_test$renal_flag  <- as.integer(SEPSISdat_test$renal_score  > 0)
-
-
-## 5.5.7 CNS proxy using Blantyre-like coma scale information
-
-coma_score_fun <- function(eye, motor, verbal) {
-  # map best-observed states to higher scores, everything else lower
-  e <- ifelse(!is.na(eye)   & eye   == "Watches or follows", 2L, 1L)
-  m <- ifelse(!is.na(motor) & motor == "Localizes painful stimulus", 2L, 1L)
-  # verbal: look for "Cries appropriately" or "speaks" anywhere in the string
+coma_score_fun <- function(eye, motor, verbal){
+  e <- ifelse(eye == "Watches or follows", 2L, 1L)
+  m <- ifelse(motor == "Localizes painful stimulus", 2L, 1L)
   v <- ifelse(!is.na(verbal) & grepl("Cries appropriately|speaks", verbal), 2L, 1L)
   e + m + v
 }
 
-SEPSISdat_train$coma_score <- mapply(
-  coma_score_fun,
-  SEPSISdat_train$bcseye_adm,
-  SEPSISdat_train$bcsmotor_adm,
-  SEPSISdat_train$bcsverbal_adm
+train$coma_score <- mapply(coma_score_fun, train$bcseye_adm, train$bcsmotor_adm, train$bcsverbal_adm)
+test$coma_score  <- mapply(coma_score_fun, test$bcseye_adm, test$bcsmotor_adm, test$bcsverbal_adm)
+
+train$coma_flag <- as.integer(train$coma_score <= 4)
+test$coma_flag  <- as.integer(test$coma_score <= 4)
+
+train$jaundice_flag <- as.integer(!is.na(train$symptoms_adm_jaundice) &
+                                    train$symptoms_adm_jaundice != "F")
+test$jaundice_flag  <- as.integer(!is.na(test$symptoms_adm_jaundice) &
+                                    test$symptoms_adm_jaundice != "F")
+
+train$fever_flag <- as.integer(train$temp_c_adm > 38 | train$temp_c_adm < 36)
+test$fever_flag  <- as.integer(test$temp_c_adm  > 38 | test$temp_c_adm  < 36)
+
+train$hypotension_flag <- as.integer(train$MAP < 60)
+test$hypotension_flag  <- as.integer(test$MAP < 60)
+
+## 7. Absolute z-scores using non-sepsis group
+nonSep <- subset(train, inhospital_mortality == 0)
+
+zVars <- c(
+  "hr_bpm_adm",
+  "rr_brpm_app_adm",
+  "sysbp_mmhg_adm",
+  "diasbp_mmhg_adm",
+  "temp_c_adm",
+  "muac_mm_adm"
 )
 
-SEPSISdat_test$coma_score <- mapply(
-  coma_score_fun,
-  SEPSISdat_test$bcseye_adm,
-  SEPSISdat_test$bcsmotor_adm,
-  SEPSISdat_test$bcsverbal_adm
-)
+zMeans <- list()
+zStds  <- list()
 
-# CNS impairment flag: lower scores imply worse neurologic status
-SEPSISdat_train$coma_flag <- as.integer(SEPSISdat_train$coma_score <= 4)
-SEPSISdat_test$coma_flag  <- as.integer(SEPSISdat_test$coma_score  <= 4)
+for(v in zVars){
+  mu  <- mean(nonSep[[v]], na.rm = TRUE)
+  sdv <- sd(nonSep[[v]],  na.rm = TRUE)
+  zMeans[[v]] <- mu
+  zStds[[v]]  <- sdv
+  
+  if(is.na(sdv) || sdv < 1e-6){
+    train[[paste0(v, "_z")]] <- 0
+    test[[paste0(v, "_z")]]  <- 0
+  } else {
+    train[[paste0(v, "_z")]] <- abs(train[[v]] - mu) / sdv
+    test[[paste0(v, "_z")]]  <- abs(test[[v]] - mu) / sdv
+  }
+}
 
+## 8. One-hot encoding
+y_train <- train$inhospital_mortality
+if(is.factor(y_train)) y_train <- as.numeric(as.character(y_train))
 
-## 5.5.8 Liver / systemic flags
+x_train <- subset(train, select = -inhospital_mortality)
+x_test  <- subset(test,  select = -inhospital_mortality)
 
-# Jaundice symptom as crude liver dysfunction proxy
-SEPSISdat_train$jaundice_flag <- as.integer(SEPSISdat_train$symptoms_adm_jaundice > 0)
-SEPSISdat_test$jaundice_flag  <- as.integer(SEPSISdat_test$symptoms_adm_jaundice  > 0)
+trMat <- model.matrix(~ . - 1, data = x_train)
+tsMat <- model.matrix(~ . - 1, data = x_test)
 
+colnames(trMat) <- make.names(colnames(trMat), unique = TRUE)
+colnames(tsMat) <- make.names(colnames(tsMat), unique = TRUE)
 
-## 5.5.9 Combined SOFA-lite score (organ dysfunction summary)
+cat("Final number of encoded features:", ncol(trMat), "\n")
 
-SEPSISdat_train$sofa_lite_score <- with(
-  SEPSISdat_train,
-  resp_failure_flag +
-    cv_failure_flag +
-    renal_flag +
-    coma_flag +
-    jaundice_flag
-)
-
-SEPSISdat_test$sofa_lite_score <- with(
-  SEPSISdat_test,
-  resp_failure_flag +
-    cv_failure_flag +
-    renal_flag +
-    coma_flag +
-    jaundice_flag
-)
-
-
-
+## 9. LightGBM model with CV
 library(lightgbm)
 library(pROC)
 
-#this matrix is all our predictive features
-train_matrix <- as.matrix(subset(SEPSISdat_train, select = -inhospital_mortality))
+dTrain <- lgb.Dataset(trMat, label = y_train)
 
-#this is the binary outcome that we are testing for?
-train_label  <- SEPSISdat_train$inhospital_mortality
+lgbParams <- list(
+  objective        = "binary",
+  metric           = "auc",
+  learning_rate    = 0.03,
+  num_leaves       = 20,
+  max_depth        = 4,
+  min_data_in_leaf = 40,
+  feature_fraction = 0.8,
+  bagging_fraction = 0.8,
+  bagging_freq     = 1,
+  lambda_l2        = 1,
+  verbose          = -1
+)
 
-#default value (found on lightgbm parameter website) should be in the range 
-#of the values in our grid search
-#these values are what the grid search will try
-#essentially trying every combination
-#NOTE: if i included more parameters, runtime increases a lot, so what parameters
-#should we prioritize? 
+cvRes <- lgb.cv(
+  params                = lgbParams,
+  data                  = dTrain,
+  nrounds               = 400,
+  nfold                 = 5,
+  stratified            = TRUE,
+  early_stopping_rounds = 40,
+  verbose               = -1
+)
 
-grid_nrounds       <- c(100, 400)
-grid_max_depth     <- c(3, 5, 7)
-grid_min_data_leaf <- c(20, 50)
+bestIter <- cvRes$best_iter
+cat("Best CV iteration =", bestIter, "\n")
 
-#initialize our variables to track our model
-best_auc <- -Inf
-best_params <- list()
-best_model <- NULL
+myTree <- lightgbm(
+  data    = dTrain,
+  label   = y_train,
+  params  = lgbParams,
+  nrounds = bestIter,
+  verbose = -1
+)
 
-##dont train for auc, train for something else?
+## 10. Predictions
+train$prob <- predict(myTree, trMat)
+test$prob  <- predict(myTree, tsMat)
 
+## 11. Threshold selection
+source(file.path("..", "scoring", "evaluate_performance.R"))
 
-#loop goes through each combination of the parameters we included above
-for (nr in grid_nrounds) {
-  for (md in grid_max_depth) {
-      for (minleaf in grid_min_data_leaf) {
+thrGrid <- seq(0.04, 0.12, by = 0.002)
+bestThr <- thrGrid[1]
+bestScore <- -9999
 
-        #this is our parameter list for the lightgbm model
-        params <- list(
-          objective = "binary",
-          metric = "auc",     ##this means we're training for auc but how would we train for something else ins
-          max_depth = md,              
-          min_data_in_leaf = minleaf,
-          verbose = -1
-        )
-
-        #this is the cross validation and produces the average cross validation results
-        #prevents overfitting?
-        cv_res <- lgb.cv(
-          params = params,
-          data = lgb.Dataset(train_matrix, label = train_label),
-          nrounds = nr,
-          nfold = 5,
-          stratified = TRUE,
-          verbose = -1
-        )
-
-        #extracts the cross validated AUC
-        cv_auc_values <- unlist(cv_res$record_evals$valid$auc$eval)
-        cv_auc <- max(cv_auc_values)
-
-        cat("nrounds =", nr,
-            "| depth =", md,
-            "| minleaf =", minleaf,
-            "| CV AUC =", round(cv_auc, 4), "\n")
-
-        #checks if model is better than the best one
-        if (cv_auc > best_auc) {
-          best_auc <- cv_auc
-          best_params <- list(
-            nrounds = nr,
-            max_depth = md,
-            min_data_in_leaf = minleaf
-          )
-
-          best_model <- lightgbm(
-            data = train_matrix,
-            label = train_label,
-            params = params,
-            nrounds = nr,
-            verbose = -1
-          )
-        }
-      }
-    }
+for(t in thrGrid){
+  predNow <- as.numeric(train$prob >= t)
+  if(length(unique(predNow)) < 2) next
+  
+  resNow <- evaluate_model(
+    labels = y_train,
+    prediction_probability = train$prob,
+    threshold = t,
+    dataset_label = "Train",
+    inference_speed = 0
+  )
+  scr <- resNow$weighted_score
+  
+  if(!is.na(scr) && scr > bestScore){
+    bestScore <- scr
+    bestThr   <- t
+  }
 }
 
-cat("\nBest params found by CV:\n")
-print(best_params)
-cat("Best CV AUC =", round(best_auc, 4), "\n")
+threshold <- bestThr
+cat("Picked threshold:", round(threshold, 3),
+    "| training weighted_score:", round(bestScore, 3), "\n")
 
-myTree <- best_model
+## 11.5 Youden check
+roc_tmp <- roc(train$inhospital_mortality, train$prob)
+ydStuff <- coords(
+  roc_tmp,
+  "b",
+  best.method = "youden",
+  input = "threshold",
+  transpose = TRUE,
+  ret = c("threshold", "sensitivity", "specificity")
+)
+cat("Youden threshold:", round(ydStuff["threshold"], 3),
+    "Sens:", round(ydStuff["sensitivity"], 3),
+    "Spec:", round(ydStuff["specificity"], 3), "\n")
 
+## 13. Final evaluation
+resTbl <- NULL
+resTbl <- rbind(
+  resTbl,
+  evaluate_model(train$inhospital_mortality, train$prob, threshold, "Training", 0)
+)
+resTbl <- rbind(
+  resTbl,
+  evaluate_model(test$inhospital_mortality,  test$prob,  threshold, "Testing",  0)
+)
+print(resTbl)
 
-# Rank Top 20 Features based on Importance
-importance <- lgb.importance(myTree, percentage = TRUE)
-cat("\nTop 20 Most Important Features:\n")
-print(head(importance, 20))
+## 14. Save model + meta file
+lgb.save(myTree, paste0(team, "_lightgbm.model"))
+cat("Saved LightGBM model:", paste0(team, "_lightgbm.model"), "\n")
 
-# Optional: plot importance
-lgb.plot.importance(importance, top_n = 20)
+meta <- list(
+  thresh = round(threshold, 3),
+  zMeans = zMeans,
+  zStds  = zStds
+)
 
+saveRDS(meta, paste0(team, "_model_meta.rds"))
+cat("Saved meta file:", paste0(team, "_model_meta.rds"), "\n")
 
-#need to control how trees develop when fitting to data
-#number of iterations (try increasing number) --> by default model doesnt run long enough
-#learning rate --> has to do with how algorithm revists errors
-#max depth
-#min data in leaf (may work against max depth)
-
-#look at parameters that can be used to deal with overfitting
-
-#bagging fraction not important
-
-
-#cross fold validation: finds optimal value for parameters
-#only do cross validation on training set
-#allows us to see how hyperparameters perform on a specific set
-#takes the data set and splits it and the picks the best model
-
-#hyperparameters optimization through grid search? (grid is something a lil below and above the default)
-
-#allows us to get the best hyper parameters (do not include learning rate in this method)
-
-
-
-## Quick but not necessarily great way to find a threshold
-SEPSISdat_train$probSepsisGBM <- predict(myTree,newdata=as.matrix(subset(SEPSISdat_train,select=-c(inhospital_mortality))))
-SEPSISdat_test$probSepsisGBM <- predict(myTree,newdata=as.matrix(subset(SEPSISdat_test,select=-c(inhospital_mortality))))
-# Plot the AUC
-library('pROC')
-roc_GBM <- roc(inhospital_mortality ~ probSepsisGBM,data=SEPSISdat_train)
-plot(roc_GBM,main=paste0('AUC=',round(roc_GBM$auc,3)))
-thresh<-coords(roc_GBM, "b", best.method="youden", input = "threshold", transpose = T,
-               ret = c("threshold", "sensitivity","specificity","ppv","npv","fp","tp","fn","tn"))
-roc_GBM_test <- roc(inhospital_mortality ~ probSepsisGBM,data=SEPSISdat_test)
-plot(roc_GBM_test,add=T,col='red')
-text(0.3,0.3,paste0('AUC_test=',round(roc_GBM_test$auc,3)),col="red")
-threshold<-thresh[1]
-
-## Prepare the things needed for submission:
-## Report the values to put into my get_sepsis_score's load_sepsis_model function
-myModel<- NULL
-myModel$thresh <- round(thresh[1],3)
-dput(myModel)
-
-# Save the model and get the threshold for use as a model
-lgb.save(myTree,paste0(team,"_","lightgbm.model"))
-round(thresh[1],3)
-
-## Quick Performance evaluation evaluate_model(label, prediction_probability, threshold)
-source(file.path("..","scoring","evaluate_performance.R"))
-res<-NULL
-res<-rbind(res,evaluate_model(SEPSISdat_train$inhospital_mortality,SEPSISdat_train$probSepsisGBM,threshold,"Training",0))
-res<-rbind(res,evaluate_model(SEPSISdat_test$inhospital_mortality,SEPSISdat_test$probSepsisGBM,threshold,"Testing",0))
-print(res)
+round(threshold, 3)
