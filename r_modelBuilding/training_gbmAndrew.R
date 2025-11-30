@@ -216,7 +216,6 @@ test$hypotension_flag  <- as.integer(test$MAP < 60)
 ## 7. Age Adjusted Z Scores
 
 # Age Adjusted HR Z score
-# the values are based on an article i found on healthy children
 get_hr_z <- function(age, hr) {
   if (age < 1) {             # 0 - 1 month
     mean <- 130; sd <- (160 - 100) / 4
@@ -239,7 +238,6 @@ test$hr_z  <- mapply(get_hr_z,  test$agecalc_adm,  test$hr_bpm_adm)
 
 
 # Age Adjusted RR Z score (based on healthy patients)
-# the values are based on an article i found on healthy children
 get_rr_z <- function(age, rr) {
   
   if (age < 12) {                     # 0 to 1 year (0–11 months)
