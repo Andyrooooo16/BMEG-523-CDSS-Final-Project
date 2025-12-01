@@ -15,42 +15,34 @@ cat("Train mortality rate =", round(mean(rawTrain$inhospital_mortality), 4), "\n
 cat("Test mortality rate  =", round(mean(rawTest$inhospital_mortality), 4), "\n")
 
 ## 2. Clean string-valued columns
-fixStrings <- function(df) {
+
+## @jodie we have to some some consolidation and cleaning for the columns with characters. I think we remove white space and also make sure any
+## not appropriate/blank values are converted to NA
+## @Andrew I put this in below that does that function, good enoguh?
+cleanupStrings <- function(df) {
   for(nm in names(df)) {
     col <- df[[nm]]
-    
-    # Only clean character columns as we handle the factors later
     if(is.character(col)) {
-      # Remove all leading and trailing spaces
       col <- trimws(col)
-      # Some data in the data set were written as NA or blanks
-      # Therefore we convert them to real NA values for proper handling
       badVals <- col %in% c("", "NA", "<NA>")
       if(any(badVals)) col[badVals] <- NA
-      # Simply put the cleaned up column back into the dataframe
       df[[nm]] <- col
     }
   }
-  # returning the dataframe
   df
 }
 
 # Clean up both the train and test set
-train <- fixStrings(rawTrain)
-test  <- fixStrings(rawTest)
+train <- cleanupStrings(rawTrain)
+test  <- cleanupStrings(rawTest)
 
 ## 3. Identify numeric vs categorical
 
-# taking the numeric column for later use in median imputation
+##splitting data into numeric vs categorical and also removing the final outcome column so we don't bias the trianing rpcoess
+
 numCols <- names(train)[sapply(train, is.numeric)]
-
-# identify columns that are factors or strings for later use
 catCols <- names(train)[sapply(train, function(x) is.factor(x) || is.character(x))]
-
-# here we remove the inhospital mortality column since this is our variable we
-# want to calculate
-numCols <- numCols[numCols != "inhospital_mortality"]
-
+numCols <- setdiff(numCols, "inhospital_mortality")
 
 
 ## 4. Numeric median imputation
@@ -336,34 +328,43 @@ test$prob  <- predict(myTree, tsMat)
 ## 11. Threshold selection
 source(file.path("..", "scoring", "evaluate_performance.R"))
 
-thrGrid <- seq(0.04, 0.12, by = 0.002)
-bestThr <- thrGrid[1]
-bestScore <- -9999
+## 11. Threshold selection
+source(file.path("..", "scoring", "evaluate_performance.R"))
 
-for(t in thrGrid){
-  predNow <- as.numeric(train$prob >= t)
-  if(length(unique(predNow)) < 2) next
+ths <- seq(0.04, 0.12, 0.002)
+best_t <- NA
+best_w <- -Inf
+
+for(t in ths){
   
-  resNow <- evaluate_model(
+  # Binary predictions at this threshold
+  p <- as.numeric(train$prob >= t)
+  
+  # Skip thresholds that collapse to a single class
+  if(length(unique(p)) < 2) next
+  
+  out <- evaluate_model(
     labels = y_train,
     prediction_probability = train$prob,
     threshold = t,
     dataset_label = "Train",
     inference_speed = 0
   )
-  scr <- resNow$weighted_score
   
-  if(!is.na(scr) && scr > bestScore){
-    bestScore <- scr
-    bestThr   <- t
+  w <- out$weighted_score
+  
+  if(!is.na(w) && w > best_w){
+    best_w <- w
+    best_t <- t
   }
 }
 
-threshold <- bestThr
-cat("Picked threshold:", round(threshold, 3),
-    "| training weighted_score:", round(bestScore, 3), "\n")
+threshold <- best_t
+cat("Chosen threshold:", round(threshold, 3),
+    "| training weighted_score:", round(best_w, 3), "\n")
 
-## 11.5 Youden check
+
+## 11.1 aub Section Youden check
 roc_tmp <- roc(train$inhospital_mortality, train$prob)
 ydStuff <- coords(
   roc_tmp,
@@ -389,17 +390,16 @@ resTbl <- rbind(
 )
 print(resTbl)
 
-## 14. Save model + meta file
+## FINALLY Save model + meta file
 lgb.save(myTree, paste0(team, "_lightgbm.model"))
 cat("Saved LightGBM model:", paste0(team, "_lightgbm.model"), "\n")
 
 meta <- list(
-  thresh = round(threshold, 3),
-  zMeans = zMeans,
-  zStds  = zStds
+  thresh = round(threshold, 3)
 )
 
 saveRDS(meta, paste0(team, "_model_meta.rds"))
 cat("Saved meta file:", paste0(team, "_model_meta.rds"), "\n")
+
 
 round(threshold, 3)
