@@ -1,0 +1,3 @@
+"dataset","AUC","AUPRC","NetBenefit","ECE","TP","FP","FN","TN","F1","Sensitivity","Specificity","inference_speed","weighted_score"
+"Training",0.932,0.537,0.022,0.0326,58,102,31,1947,0.967,0.95,0.652,0,0.8
+"Testing",0.822,0.372,0.02,0.0232,14,27,16,483,0.957,0.947,0.467,0,0.75
