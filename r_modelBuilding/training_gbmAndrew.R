@@ -118,8 +118,6 @@ for (bin in unique(train$age_bin)) {
   # rows belonging to this bin
   rows <- which(train$age_bin == bin)
   
-  # skip bins with very few rows i.e patients
-  if(length(rows) < 3) next
   
   # extract height and weight for this bin
   weight <- train$weight_kg_adm[rows]

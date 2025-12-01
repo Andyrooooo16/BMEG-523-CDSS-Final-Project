@@ -16,9 +16,15 @@ cat("Test mortality rate  =", round(mean(rawTest$inhospital_mortality), 4), "\n"
 
 ## 2. Clean string-valued columns
 
+
+##
 ## @jodie we have to some some consolidation and cleaning for the columns with characters. I think we remove white space and also make sure any
 ## not appropriate/blank values are converted to NA
 ## @Andrew I put this in below that does that function, good enoguh?
+##instead of MICE i think we clean the string columns by hand because they contain messy text
+## like blank entries, “NA”, “<NA>”, etc. also mice isn’t meant for this type of cleanup.
+# Converting these to real NA and filling with the most common value is safer
+# and avoids creating fake symptom values
 cleanupStrings <- function(df) {
   for(nm in names(df)) {
     col <- df[[nm]]
@@ -36,6 +42,8 @@ cleanupStrings <- function(df) {
 train <- cleanupStrings(rawTrain)
 test  <- cleanupStrings(rawTest)
 
+
+
 ## 3. Identify numeric vs categorical
 
 ##splitting data into numeric vs categorical and also removing the final outcome column so we don't bias the trianing rpcoess
@@ -45,9 +53,12 @@ catCols <- names(train)[sapply(train, function(x) is.factor(x) || is.character(x
 numCols <- setdiff(numCols, "inhospital_mortality")
 
 
-## 4. Numeric median imputation
 
-# Compute the median for every numeric column in the training set.
+
+##@jodie do we replace the NAs with mean or median?? 
+##@andrew median is probably the way to go because we still have outliers therefore i think median is more stable
+
+## 4. Numeric median imputation
 numMeds <- sapply(train[numCols], function(x) median(x, na.rm = TRUE))
 
 # here we replace any NA values with the median values in both training and test
@@ -55,6 +66,9 @@ for(v in numCols){
   if(any(is.na(train[[v]]))) train[[v]][is.na(train[[v]])] <- numMeds[[v]]
   if(any(is.na(test[[v]])))  test[[v]][is.na(test[[v]])]  <- numMeds[[v]]
 }
+
+
+## @jodie i think for the categorical NA values, we should probably replace it with the most common outcome in that column? can you double check if what i did was right
 
 ## 5. Categorical mode imputation
 
@@ -83,10 +97,16 @@ for(v in catCols){
   test[[v]]  <- factor(test[[v]], levels = levels(train[[v]]))
 }
 
+
+
+
+# when plotting the age vs height and age vs weight, there was clear outliers probalby from human imputation error
+# we replaced those outliers with the age group mean because, after removing extremes, the mean gives a better estimate of typical growth than the median
+
 ## 5.5 Remove height/weight outliers by age bin (train only)
 library(dplyr)
 
-# created age bins with 6 month gaps
+# use 6 month gaps because it has children physiologically similar, but large enough to ensure we still have multiple patients per bin for IQR calculations
 train$age_bin <- cut(
   train$agecalc_adm,
   breaks = seq(0, 72, by = 6),
@@ -94,7 +114,6 @@ train$age_bin <- cut(
   right = FALSE
 )
 
-# finding outliers with IQR method
 outliers <- function(x){
   Q1  <- quantile(x, 0.25, na.rm = TRUE)
   Q3  <- quantile(x, 0.75, na.rm = TRUE)
@@ -110,10 +129,6 @@ for (bin in unique(train$age_bin)) {
   # rows belonging to this bin
   rows <- which(train$age_bin == bin)
   
-  # skip bins with very few rows i.e patients
-  if(length(rows) < 3) next
-  
-  # extract height and weight for this bin
   weight <- train$weight_kg_adm[rows]
   height <- train$height_cm_adm[rows]
   
@@ -121,8 +136,7 @@ for (bin in unique(train$age_bin)) {
   w_out <- outliers(weight)
   h_out <- outliers(height)
   
-  # compute the mean but not including the outliers or else it will
-  # heavily distort our mean
+  # compute the mean but not including the outliers or else it will heavily distort our mean
   w_mean_clean <- mean(weight[!w_out], na.rm = TRUE)
   h_mean_clean <- mean(height[!h_out], na.rm = TRUE)
   
@@ -131,15 +145,19 @@ for (bin in unique(train$age_bin)) {
   train_clean$height_cm_adm[rows][h_out] <- h_mean_clean
 }
 
-# remove the age bin column since test set doesnt have it and it will mess 
-# up our algorithm later on
+# remove the age bin column since test set doesnt have it and it will mess up our algorithm later on
 train_clean$age_bin <- NULL
 
-# overwrite train
+#overwrite train
 train <- train_clean
 
 
-## 6. Clinical engineered features
+## 6. New Features addded
+
+# Shock Index (this was already given from base code)
+train$SI <- train$hr_bpm_adm / train$sysbp_mmhg_adm
+test$SI  <- test$hr_bpm_adm  / test$sysbp_mmhg_adm
+
 
 # Mean Arterial Pressure
 train$MAP <- (train$sysbp_mmhg_adm + 2 * train$diasbp_mmhg_adm) / 3
@@ -149,14 +167,62 @@ test$MAP  <- (test$sysbp_mmhg_adm  + 2 * test$diasbp_mmhg_adm)  / 3
 train$pulse_pressure <- train$sysbp_mmhg_adm - train$diasbp_mmhg_adm
 test$pulse_pressure  <- test$sysbp_mmhg_adm  - test$diasbp_mmhg_adm
 
-# Shock Index
-train$SI <- train$hr_bpm_adm / pmax(train$sysbp_mmhg_adm, 1e-3)
-test$SI  <- test$hr_bpm_adm  / pmax(test$sysbp_mmhg_adm,  1e-3)
+
+# @jodie for these z scores, should we use real life data for the mean and standard deviation for calculating z scores, or
+# do we use the mean and standard deviation of the healthy patients in our dataset? i already found some data that we can use from online
+# @andrew i think we can stick with your code
+
+# Age Adjusted HR Z score (based on healthy children).the values are based on a source i found on healthy children
+get_hr_z <- function(age, hr) {
+  if (age < 1) {             
+    mean <- 130; sd <- (160 - 100) / 4
+  } else if (age < 12) {     
+    mean <- 110; sd <- (140 - 80) / 4
+  } else if (age < 36) {     
+    mean <- 105; sd <- (130 - 80) / 4
+  } else if (age < 60) {    
+    mean <- 95;  sd <- (110 - 80) / 4
+  } else if (age < 144) {    
+    mean <- 85;  sd <- (100 - 70) / 4
+  } else {                   
+    mean <- 80;  sd <- (100 - 60) / 4
+  }
+  (hr - mean) / sd
+}
+
+train$hr_z <- mapply(get_hr_z, train$agecalc_adm, train$hr_bpm_adm)
+test$hr_z  <- mapply(get_hr_z,  test$agecalc_adm,  test$hr_bpm_adm)
+
+
+# Age Adjusted RR Z score (based on healthy patients).the values are based on a source i found on healthy children
+get_rr_z <- function(age, rr) {
+  
+  if (age < 12) {                     
+    mean <- 45;  sd <- (60 - 30) / 4  
+    
+  } else if (age < 36) {              
+    mean <- 32;  sd <- (40 - 24) / 4  
+    
+  } else if (age < 72) {              
+    mean <- 28;  sd <- (34 - 22) / 4  
+    
+  } else if (age < 144) {             
+    mean <- 24;  sd <- (30 - 18) / 4 
+    
+  } else {                            
+    mean <- 14;  sd <- (16 - 12) / 4  
+  }
+  
+  (rr - mean) / sd
+}
+
+train$rr_z <- mapply(get_rr_z, train$agecalc_adm, train$rr_brpm_app_adm)
+test$rr_z  <- mapply(get_rr_z,  test$agecalc_adm,  test$rr_brpm_app_adm)
+
 
 
 # Respiratory Failure Flag
-# mark a child as having respiratory failure if their oxygen saturation (SpO2) is below 92%, 
-# or if there is any documented respiratory distress
+# mark a child as having respiratory failure if their oxygen saturation (SpO2) is below 92%, or if there is any documented respiratory distress
 train$resp_failure_flag <- as.integer(
   train$spo2site1_pc_oxi_adm < 92 |
     (!is.na(train$respdistress_adm) & train$respdistress_adm != "F")
@@ -168,15 +234,13 @@ test$resp_failure_flag <- as.integer(
 
 
 # Coma Score
-# for each variable, give a score of 2 if they show normal response
-# give a score of 1 if the response is reduced
+# for each variable, give a score of 2 if they show normal response, give a score of 1 if the response is reduced
 coma_score_fun <- function(eye, motor, verbal){
   e <- ifelse(eye == "Watches or follows", 2L, 1L)
   m <- ifelse(motor == "Localizes painful stimulus", 2L, 1L)
   v <- ifelse(!is.na(verbal) & grepl("Cries appropriately|speaks", verbal), 2L, 1L)
   
-  #total score (range 3–6).
-  #lower scores represent worse neurological status
+  #total score (range 3–6) where lower scores represent worse neurological status
   e + m + v
 }
 train$coma_score <- mapply(coma_score_fun, train$bcseye_adm, train$bcsmotor_adm, train$bcsverbal_adm)
@@ -205,60 +269,10 @@ train$hypotension_flag <- as.integer(train$MAP < 60)
 test$hypotension_flag  <- as.integer(test$MAP < 60)
 
 
-## 7. Age Adjusted Z Scores
 
-# Age Adjusted HR Z score
-# the values are based on an article i found on healthy children
-get_hr_z <- function(age, hr) {
-  if (age < 1) {             # 0 - 1 month
-    mean <- 130; sd <- (160 - 100) / 4
-  } else if (age < 12) {     # 1 - 12 months
-    mean <- 110; sd <- (140 - 80) / 4
-  } else if (age < 36) {     # 1 - 3 years
-    mean <- 105; sd <- (130 - 80) / 4
-  } else if (age < 60) {     # 3 - 5 years
-    mean <- 95;  sd <- (110 - 80) / 4
-  } else if (age < 144) {    # 6 - 12 years
-    mean <- 85;  sd <- (100 - 70) / 4
-  } else {                   # adolescents
-    mean <- 80;  sd <- (100 - 60) / 4
-  }
-  (hr - mean) / sd
-}
+## @andrew i found one hot coding to be good for light gbm cuz it essentially turns our categorical variables into numbers for our algorithm to use later
 
-train$hr_z <- mapply(get_hr_z, train$agecalc_adm, train$hr_bpm_adm)
-test$hr_z  <- mapply(get_hr_z,  test$agecalc_adm,  test$hr_bpm_adm)
-
-
-# Age Adjusted RR Z score (based on healthy patients)
-# the values are based on an article i found on healthy children
-get_rr_z <- function(age, rr) {
-  
-  if (age < 12) {                     # 0 to 1 year (0–11 months)
-    mean <- 45;  sd <- (60 - 30) / 4  # 30–60
-    
-  } else if (age < 36) {              # 1–3 years
-    mean <- 32;  sd <- (40 - 24) / 4  # 24–40
-    
-  } else if (age < 72) {              # 3–6 years
-    mean <- 28;  sd <- (34 - 22) / 4  # 22–34
-    
-  } else if (age < 144) {             # 6–12 years
-    mean <- 24;  sd <- (30 - 18) / 4  # 18–30
-    
-  } else {                            # 12–18 years (adolescent)
-    mean <- 14;  sd <- (16 - 12) / 4  # 12–16
-  }
-  
-  (rr - mean) / sd
-}
-
-train$rr_z <- mapply(get_rr_z, train$agecalc_adm, train$rr_brpm_app_adm)
-test$rr_z  <- mapply(get_rr_z,  test$agecalc_adm,  test$rr_brpm_app_adm)
-
-
-
-## 8. One-hot encoding
+## 7. One-hot encoding
 y_train <- train$inhospital_mortality
 if(is.factor(y_train)) y_train <- as.numeric(as.character(y_train))
 
@@ -275,22 +289,24 @@ cat("Final number of encoded features:", ncol(trMat), "\n")
 
 
 
-## 9. LightGBM model with CV
+## 8. LightGBM model with CV
 library(lightgbm)
 library(pROC)
 
 #need to convert our training matrix to proper lgbm format
 dTrain <- lgb.Dataset(trMat, label = y_train)
 
-#hyperparameters we manually adjust
+
+# @jodie TA said to try prevent overfitting, what parameters can we adjust to do that?
+# @andrew these parameters i found online seem to affect the overfitting, lets try fixing these
 lgbParams <- list(
-  objective        = "binary",  #binary classification because 0 or 1 for mortality
+  objective        = "binary",  
   metric           = "auc",
-  learning_rate    = 0.03,   #slower learning rate than the default but better generalization
-  num_leaves       = 20,       #lower leaves than default gives simpler trees which results in less overfitting
-  max_depth        = 4,    #limit how deep each tree can grow
-  min_data_in_leaf = 40,    #minimum samples per leaf node
-  feature_fraction = 0.7,    #randomly use 70% of features per tree which adds randomness to reduces overfitting
+  learning_rate    = 0.03,   
+  num_leaves       = 20,       
+  max_depth        = 4,    
+  min_data_in_leaf = 40,   
+  feature_fraction = 0.7,    
   bagging_fraction = 0.7,
   bagging_freq     = 1,
   lambda_l2        = 1,
@@ -298,7 +314,8 @@ lgbParams <- list(
 )
 
 
-#cross validation
+#5 fold cross validation to find the best number of boosting rounds which lets model stop early if performance stops improving, 
+#which helps prevent overfitting.
 cvRes <- lgb.cv(
   params                = lgbParams,
   data                  = dTrain,
@@ -313,6 +330,8 @@ cvRes <- lgb.cv(
 bestIter <- cvRes$best_iter
 cat("Best CV iteration =", bestIter, "\n")
 
+
+#train the model using the number of rounds that was found to be the most optimal in cross
 myTree <- lightgbm(
   data    = dTrain,
   label   = y_train,
@@ -321,28 +340,31 @@ myTree <- lightgbm(
   verbose = -1
 )
 
-## 10. Predictions
+## 9. Predictions
 train$prob <- predict(myTree, trMat)
 test$prob  <- predict(myTree, tsMat)
 
-## 11. Threshold selection
+
+## 10. Threshold selection
+
+#load the scoring function so we can test different cutoff values
 source(file.path("..", "scoring", "evaluate_performance.R"))
 
-## 11. Threshold selection
-source(file.path("..", "scoring", "evaluate_performance.R"))
 
+#try a range of thresholds and keep the one that scores best
 ths <- seq(0.04, 0.12, 0.002)
 best_t <- NA
 best_w <- -Inf
 
 for(t in ths){
   
-  # Binary predictions at this threshold
+  #binary predictions at this threshold
   p <- as.numeric(train$prob >= t)
   
-  # Skip thresholds that collapse to a single class
+  #skip if model predicts only one class
   if(length(unique(p)) < 2) next
   
+  #gets the score for this threshold
   out <- evaluate_model(
     labels = y_train,
     prediction_probability = train$prob,
@@ -353,6 +375,7 @@ for(t in ths){
   
   w <- out$weighted_score
   
+  #keep the threshold if it performs better
   if(!is.na(w) && w > best_w){
     best_w <- w
     best_t <- t
@@ -364,7 +387,7 @@ cat("Chosen threshold:", round(threshold, 3),
     "| training weighted_score:", round(best_w, 3), "\n")
 
 
-## 11.1 aub Section Youden check
+## 10.1 aub Section Youden check
 roc_tmp <- roc(train$inhospital_mortality, train$prob)
 ydStuff <- coords(
   roc_tmp,
@@ -374,11 +397,13 @@ ydStuff <- coords(
   transpose = TRUE,
   ret = c("threshold", "sensitivity", "specificity")
 )
+
+#print the youden threshold so we can compare it to our chosen threshold
 cat("Youden threshold:", round(ydStuff["threshold"], 3),
     "Sens:", round(ydStuff["sensitivity"], 3),
     "Spec:", round(ydStuff["specificity"], 3), "\n")
 
-## 13. Final evaluation
+## 11. Final evaluation
 resTbl <- NULL
 resTbl <- rbind(
   resTbl,
