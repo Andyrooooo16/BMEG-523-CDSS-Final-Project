@@ -35,6 +35,8 @@ cleanupStrings <- function(df) {
 # Clean up both the train and test set
 train <- cleanupStrings(rawTrain)
 test  <- cleanupStrings(rawTest)
+#wait do we need to add a line here so it works with the evaluation code?
+#@Andrew I don't think so because our model is being used for evaluation not the training gbm code. 
 
 ## 3. Identify numeric vs categorical
 
@@ -83,7 +85,7 @@ for(v in catCols){
   test[[v]]  <- factor(test[[v]], levels = levels(train[[v]]))
 }
 
-## 5.5 Remove height/weight outliers by age bin (train only)
+## 5.1 Remove height/weight outliers by age bin (train only)
 library(dplyr)
 
 # created age bins with 6 month gaps
@@ -140,6 +142,7 @@ train <- train_clean
 
 
 ## 6. Clinical engineered features
+## @jodie, decided to remove SIRS and SOFA because they were not improving our weighted scores. 
 
 # Mean Arterial Pressure
 train$MAP <- (train$sysbp_mmhg_adm + 2 * train$diasbp_mmhg_adm) / 3
@@ -276,6 +279,7 @@ cat("Final number of encoded features:", ncol(trMat), "\n")
 
 
 ## 9. LightGBM model with CV
+
 library(lightgbm)
 library(pROC)
 
